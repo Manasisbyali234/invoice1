@@ -252,63 +252,12 @@ export default function InvoiceCopyManager() {
   const [selectedFiles, setSelectedFiles] = useState(new Set());
   const fileInputRef = useRef(null);
   const toastTimer = useRef(null);
-  const [previewImages, setPreviewImages] = useState([]);
-  const [previewLoading, setPreviewLoading] = useState(false);
-
   const [paperSize, setPaperSize] = useState("A5");
   const [orientation, setOrientation] = useState("landscape");
   const [cancelRequested, setCancelRequested] = useState(false);
   const [processingTotal, setProcessingTotal] = useState(0);
   const [processingProgress, setProcessingProgress] = useState(0);
-  const [showPrintPreview, setShowPrintPreview] = useState(false);
-  const [previewFile, setPreviewFile] = useState(null);
-  const [previewPageNums, setPreviewPageNums] = useState([]);
-  const [previewActivePageIdx, setPreviewActivePageIdx] = useState(0);
-
-  // Chrome-Style Print Settings State
-  const [systemPrinters, setSystemPrinters] = useState([]);
-  const [printDestination, setPrintDestination] = useState("default");
-  const [printPageSelection, setPrintPageSelection] = useState("all");
-  const [printCustomRange, setPrintCustomRange] = useState("");
-  const [printColor, setPrintColor] = useState("bw"); // Default to Black and white
-  const [printPaperSize, setPrintPaperSize] = useState("A5");
-  const [printOrientation, setPrintOrientation] = useState("landscape");
-  const [printPagesPerSheet, setPrintPagesPerSheet] = useState("1");
-  const [printMargins, setPrintMargins] = useState("default");
-  const [printScale, setPrintScale] = useState("default");
-  const [printCopies, setPrintCopies] = useState(1);
-  const [showMoreSettings, setShowMoreSettings] = useState(false);
   const [isExecutingPrint, setIsExecutingPrint] = useState(false);
-  const [bulkPendingFiles, setBulkPendingFiles] = useState(null);
-
-  const loadPrinters = useCallback(async () => {
-    try {
-      if (window.printAPI?.getPrinters) {
-        const list = await window.printAPI.getPrinters();
-        if (Array.isArray(list) && list.length > 0) {
-          setSystemPrinters(list);
-          const defaultP = list.find(p => p.isDefault) || list[0];
-          if (defaultP) {
-            setPrintDestination(defaultP.name);
-          }
-          return;
-        }
-      }
-    } catch (e) {
-      console.warn("Could not query system printers:", e);
-    }
-    setSystemPrinters([
-      { name: "default", displayName: "Microsoft Print to PDF (or Default)", isDefault: true },
-      { name: "Microsoft Print to PDF", displayName: "Microsoft Print to PDF", isDefault: false },
-    ]);
-  }, []);
-
-  useEffect(() => {
-    if (showPrintPreview) {
-      loadPrinters();
-      setPreviewActivePageIdx(0);
-    }
-  }, [showPrintPreview, loadPrinters]);
 
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
@@ -690,459 +639,77 @@ export default function InvoiceCopyManager() {
     toast("Excel exported");
   };
 
+  const activeFile = files.find(f => f.id === activeId) || null;
+  const selectedFilesList = files.filter(f => selectedFiles.has(f.id));
+
   const toggleFileSel = (id) => setSelectedFiles(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const toggleAllFiles = () => {
     if (selectedFiles.size === files.length) setSelectedFiles(new Set());
     else setSelectedFiles(new Set(files.map(f => f.id)));
   };
 
-  const activeFile = files.find(f => f.id === activeId) || null;
-  const selectedFilesList = files.filter(f => selectedFiles.has(f.id));
+  const printingRef = useRef(false);
 
-  const printingRef = useRef(false); // guard against double-click / re-render triggers
-
-  // bulkPendingFiles holds the list waiting for modal confirmation
-
-  const executeBulkPrint = useCallback(async (filesToPrint) => {
-    if (!filesToPrint.length || printingRef.current) return;
+  const openSystemPrint = useCallback(async (file, pageNums) => {
+    if (printingRef.current) return;
     printingRef.current = true;
-    setIsExecutingPrint(true);
-    toast(`Preparing bulk print for ${filesToPrint.length} file(s)…`);
-
+    toast("Opening print dialog\u2026");
     try {
-      // ── Electron path: pipeline write+print for maximum speed ──
-      if (window.printAPI?.printPdfFile) {
-        let successCount = 0;
-        let jobCounter = 0;
-        const device = printDestination && printDestination !== "default" ? printDestination : undefined;
-        const copies = parseInt(printCopies, 10) || 1;
-
-        const getPdfBytes = async (f) => {
-          let buf = f._pdfBuf || pdfCache.get(f.id);
-          if (!buf) { try { buf = await window.db?.getPdf(f.id); } catch (_) {} }
-          if (!buf) return null;
-          if (buf instanceof Uint8Array)
-            return (buf.byteOffset !== 0 || buf.buffer.byteLength !== buf.byteLength) ? new Uint8Array(buf) : buf;
-          return new Uint8Array(buf instanceof ArrayBuffer ? buf : buf);
-        };
-
-        let nextWritePromise = (async () => {
-          const f = filesToPrint[0];
-          const bytes = await getPdfBytes(f);
-          if (!bytes) return { f, writeResult: { error: "PDF not available" } };
-          const jobId = `${Date.now()}_${++jobCounter}`;
-          return { f, writeResult: await window.printAPI.writeTempPdf(bytes, jobId, printOrientation) };
-        })();
-
-        for (let i = 0; i < filesToPrint.length; i++) {
-          const currentPromise = nextWritePromise;
-          if (i + 1 < filesToPrint.length) {
-            nextWritePromise = (async () => {
-              const f = filesToPrint[i + 1];
-              const bytes = await getPdfBytes(f);
-              if (!bytes) return { f, writeResult: { error: "PDF not available" } };
-              const jobId = `${Date.now()}_${++jobCounter}`;
-              return { f, writeResult: await window.printAPI.writeTempPdf(bytes, jobId, printOrientation) };
-            })();
-          }
-
-          const { f, writeResult } = await currentPromise;
-          if (writeResult?.error) { toast(`Skipping ${f.name}: ${writeResult.error}`); continue; }
-
-          toast(`Printing ${f.name} (${i + 1}/${filesToPrint.length})…`);
-          const result = await window.printAPI.printPdfFile({
-            filePath: writeResult.path,
-            deviceName: device,
-            silent: true,
-            color: printColor === "color",
-            copies,
-            pageSize: (() => {
-              const m = { A2:"A2",A3:"A3",A4:"A4",A5:"A5",B4:"B4",B5:"B5",
-                Letter:"Letter",Legal:"Legal","Indian Legal":"IndianLegal",
-                Tabloid:"Tabloid",Ledger:"Ledger",Executive:"Executive" };
-              return m[printPaperSize] || "A5";
-            })(),
-            orientation: printOrientation,
-            margins: printMargins,
-          });
-          window.printAPI.deleteTempPdf(writeResult.path).catch(() => {});
-          if (result?.success) successCount++;
-          else if (result?.error && !result.error.toLowerCase().includes("cancel"))
-            toast(`Print failed for ${f.name}: ${result.error}`);
-        }
-        toast(`Bulk print complete: ${successCount}/${filesToPrint.length} sent ✓`);
-        return;
+      let buf = file._pdfBuf || pdfCache.get(file.id);
+      if (!buf) { try { buf = await window.db?.getPdf(file.id); } catch (_) {} }
+      if (!buf) { toast("PDF not available for printing"); return; }
+      let pdfBytes;
+      if (buf instanceof Uint8Array) {
+        pdfBytes = (buf.byteOffset !== 0 || buf.buffer.byteLength !== buf.byteLength) ? new Uint8Array(buf) : buf;
+      } else {
+        pdfBytes = new Uint8Array(buf instanceof ArrayBuffer ? buf : buf);
       }
-
-      // ── Web fallback: rasterise ALL pages from ALL files into ONE print window ──
-      const allPagesData = [];
-      const renderScale = 1.0; // 1:1 — natural PDF pixel size, no browser rescaling
-      const jpegQuality = 0.95;
-
-      for (const f of filesToPrint) {
-        let buf = f._pdfBuf || pdfCache.get(f.id);
-        if (!buf) { try { buf = await window.db?.getPdf(f.id); } catch (_) {} }
-        if (!buf) { toast(`Skipping ${f.name} — PDF not available`); continue; }
-
-        const pdf = await pdfjsLib.getDocument({ data: buf.slice ? buf.slice(0) : buf }).promise;
-        for (let i = 1; i <= pdf.numPages; i++) {
-          const pg = await pdf.getPage(i);
-          const viewport = pg.getViewport({ scale: renderScale });
-          const canvas = document.createElement("canvas");
-          canvas.width = viewport.width; canvas.height = viewport.height;
-          const ctx = canvas.getContext("2d");
-          await pg.render({ canvasContext: ctx, viewport }).promise;
-          if (printColor === "bw") {
-            const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-            const d = imgData.data;
-            for (let j = 0; j < d.length; j += 4) {
-              const g = 0.299 * d[j] + 0.587 * d[j+1] + 0.114 * d[j+2];
-              d[j] = d[j+1] = d[j+2] = g;
-            }
-            ctx.putImageData(imgData, 0, 0);
-          }
-          allPagesData.push(canvas.toDataURL("image/jpeg", jpegQuality));
-          if (allPagesData.length % 5 === 0) await new Promise(r => setTimeout(r, 0));
+      const allPageNums = Array.from({ length: file.pageCount }, (_, i) => i + 1);
+      const isAllPages = pageNums.length === file.pageCount && pageNums.every((n, i) => n === allPageNums[i]);
+      let pageRanges;
+      if (!isAllPages) {
+        const sorted = [...pageNums].sort((a, b) => a - b);
+        pageRanges = [];
+        let start = sorted[0], end = sorted[0];
+        for (let i = 1; i < sorted.length; i++) {
+          if (sorted[i] === end + 1) { end = sorted[i]; }
+          else { pageRanges.push({ from: start - 1, to: end - 1 }); start = end = sorted[i]; }
         }
+        pageRanges.push({ from: start - 1, to: end - 1 });
       }
-
-      if (!allPagesData.length) { toast("No pages to print"); return; }
-
-      const marginCss = printMargins === "none" ? "0" : printMargins === "minimum" ? "3mm" : "5mm";
-      const PAPER_DIMS_MM = {
-        A2: [594, 420], A3: [420, 297], A4: [297, 210], A5: [210, 148],
-        B4: [353, 250], B5: [250, 176],
-        Letter: [279, 216], Legal: [356, 216], "Indian Legal": [345, 215],
-        Tabloid: [432, 279], Ledger: [432, 279], Executive: [267, 184],
-      };
-      const bDims = PAPER_DIMS_MM[printPaperSize] || PAPER_DIMS_MM["A5"];
-      const bPgW = Math.max(...bDims);
-      const bPgH = Math.min(...bDims);
-      const htmlContent = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
-        @page{size:${bPgW}mm ${bPgH}mm;margin:${marginCss}}
-        *{margin:0;padding:0;box-sizing:border-box}
-        html,body{width:${bPgW}mm;height:auto;margin:0;padding:0;background:#fff;
-          -webkit-print-color-adjust:exact;print-color-adjust:exact;overflow:visible}
-        .p{display:block;width:${bPgW}mm;page-break-after:always;break-after:page;
-          page-break-inside:avoid;break-inside:avoid}
-        .p:last-child{page-break-after:auto;break-after:auto}
-        .p img{display:block;width:100%;height:auto}
-        @media print{
-          @page{size:${bPgW}mm ${bPgH}mm;margin:${marginCss}}
-          html,body{width:${bPgW}mm;height:auto;margin:0;padding:0;overflow:visible}
-          .p img{display:block;width:100%;height:auto}
-        }
-      </style></head><body>
-      ${allPagesData.map(src => `<div class="p"><img src="${src}"/></div>`).join("")}
-      <script>
-        (function(){
-          var printed=false;
-          function doPrint(){if(printed)return;printed=true;window.print();}
-          if(document.readyState==='complete'){requestAnimationFrame(doPrint);}
-          else{window.addEventListener('load',function(){requestAnimationFrame(doPrint);});}
-          window.addEventListener('afterprint',function(){setTimeout(function(){try{window.close();}catch(_){}},100);});
-        })();
-      <\/script>
-      </body></html>`;
-
-      const w = window.open("", "_blank");
-      if (w) { w.document.write(htmlContent); w.document.close(); }
-      toast(`Bulk print: ${allPagesData.length} pages sent to printer`);
+      if (window.printAPI?.openSystemDialog) {
+        const result = await window.printAPI.openSystemDialog(pdfBytes, pageRanges);
+        if (!result?.success) toast(`Print error: ${result?.error || "Unknown error"}`);
+      } else {
+        toast("Printing is only available inside the Invoice Manager desktop app.");
+      }
     } catch (err) {
-      console.error("Bulk print error:", err);
-      toast(`Bulk print error: ${err.message || "Unknown error"}`);
+      toast(`Print error: ${err.message || "Unknown error"}`);
     } finally {
-      setIsExecutingPrint(false);
       printingRef.current = false;
     }
-  }, [printColor, printPaperSize, printOrientation, printMargins, printCopies, printDestination, toast]);
+  }, [toast]);
 
-  // bulkPrint: show print settings modal first, then execute on confirm
-  const bulkPrint = useCallback((filesToPrint) => {
+  const printPages = useCallback((f, pageNums) => {
+    openSystemPrint(f, pageNums);
+  }, [openSystemPrint]);
+
+  const bulkPrint = useCallback(async (filesToPrint) => {
     if (!filesToPrint.length) return;
-    setBulkPendingFiles(filesToPrint);
-    // Load printers and show the modal (reuse existing print preview modal)
-    loadPrinters();
-    setShowPrintPreview(true);
-    // Use a dummy previewFile so the modal renders — bulk confirm replaces normal print
-    setPreviewFile(filesToPrint[0]);
-    setPreviewPageNums(filesToPrint[0].pages.map(p => p.pageNum));
-    setPreviewActivePageIdx(0);
-  }, [loadPrinters]);
+    setIsExecutingPrint(true);
+    for (const f of filesToPrint) {
+      printingRef.current = false;
+      await openSystemPrint(f, f.pages.map(p => p.pageNum));
+    }
+    setIsExecutingPrint(false);
+  }, [openSystemPrint]);
 
   const openPrintModal = useCallback((file, pageNums) => {
     if (!file || !pageNums || !pageNums.length) return;
-    setPreviewFile(file);
-    setPreviewPageNums(pageNums);
-    setPreviewActivePageIdx(0);
-    setShowPrintPreview(true);
-  }, []);
+    openSystemPrint(file, pageNums);
+  }, [openSystemPrint]);
 
-  const printPages = useCallback(async (f, pageNums) => {
-    openPrintModal(f, pageNums);
-  }, [openPrintModal]);
 
-  const targetPrintPageNums = useMemo(() => {
-    if (!previewPageNums || !previewPageNums.length) return [];
-    if (printPageSelection === "all") return previewPageNums;
-    if (printPageSelection === "custom" && printCustomRange.trim()) {
-      try {
-        const parts = printCustomRange.split(",");
-        const set = new Set();
-        for (const p of parts) {
-          const trimmed = p.trim();
-          if (trimmed.includes("-")) {
-            const [start, end] = trimmed.split("-").map(Number);
-            if (!isNaN(start) && !isNaN(end)) {
-              for (let i = start; i <= end; i++) {
-                if (previewPageNums.includes(i)) set.add(i);
-              }
-            }
-          } else {
-            const num = Number(trimmed);
-            if (!isNaN(num) && previewPageNums.includes(num)) set.add(num);
-          }
-        }
-        const arr = [...set].sort((a, b) => a - b);
-        return arr.length ? arr : previewPageNums;
-      } catch (_) {
-        return previewPageNums;
-      }
-    }
-    return previewPageNums;
-  }, [previewPageNums, printPageSelection, printCustomRange]);
-
-  // Rasterise preview pages whenever the modal opens or settings change.
-  // Must be placed AFTER targetPrintPageNums useMemo to avoid TDZ error.
-  useEffect(() => {
-    if (!showPrintPreview || !previewFile) return;
-    if (!window.printAPI?.renderPreview) return;
-    let cancelled = false;
-    const buf = previewFile._pdfBuf || pdfCache.get(previewFile.id);
-    if (!buf) return;
-    const marginVal = printMargins === "none" ? 0 : printMargins === "minimum" ? 3 : 5;
-    const pageSizeMap = {
-      A2:"A2",A3:"A3",A4:"A4",A5:"A5",B4:"B4",B5:"B5",
-      Letter:"Letter",Legal:"Legal","Indian Legal":"IndianLegal",
-      Tabloid:"Tabloid",Ledger:"Ledger",Executive:"Executive",
-    };
-    const paperKey = pageSizeMap[printPaperSize] || "A5";
-    const pagesToRender = targetPrintPageNums.slice(0, 20);
-    setPreviewLoading(true);
-    setPreviewImages([]);
-    (async () => {
-      try {
-        let pdfBytes;
-        if (buf instanceof Uint8Array) {
-          pdfBytes = (buf.byteOffset !== 0 || buf.buffer.byteLength !== buf.byteLength)
-            ? new Uint8Array(buf) : buf;
-        } else {
-          pdfBytes = new Uint8Array(buf instanceof ArrayBuffer ? buf : buf);
-        }
-        const result = await window.printAPI.renderPreview(pdfBytes, pagesToRender, paperKey, marginVal);
-        if (cancelled) return;
-        if (result?.pages) setPreviewImages(result.pages);
-      } catch (e) {
-        console.warn("Preview render failed:", e);
-      } finally {
-        if (!cancelled) setPreviewLoading(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showPrintPreview, previewFile?.id, printPaperSize, printMargins, printColor, targetPrintPageNums.join(",")]);
-
-  const executePrint = useCallback(async (f, pageNumsToPrint, customOptions = {}) => {
-    if (!f || !pageNumsToPrint || !pageNumsToPrint.length) return;
-    if (printingRef.current) return; // prevent double-click / re-render trigger
-    printingRef.current = true;
-
-    const colorMode = customOptions.color || printColor;
-    const paper     = customOptions.paperSize || printPaperSize;
-    const margins   = customOptions.margins || printMargins;
-    const copies    = customOptions.copies || printCopies;
-    const destination = customOptions.destination || printDestination;
-    const orient    = customOptions.orientation || printOrientation; // use user selection
-
-    setIsExecutingPrint(true);
-    toast("Preparing print…");
-
-    try {
-      // ── Electron path: send PDF file directly — zero rasterisation ──
-      if (window.printAPI?.printPdfFile) {
-        let buf = f._pdfBuf || pdfCache.get(f.id);
-        if (!buf) {
-          toast("Loading PDF…");
-          try { buf = await window.db?.getPdf(f.id); } catch (_) {}
-        }
-        if (!buf) { toast("PDF not available for printing"); setIsExecutingPrint(false); return; }
-
-        // Use a unique jobId — Date.now() alone can collide on fast repeated prints
-        const jobId = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-        // Always pass a plain Uint8Array with correct byteOffset/byteLength.
-        // buf.buffer on a Node Buffer spans the ENTIRE underlying ArrayBuffer,
-        // not just the slice — so we must copy only the relevant bytes.
-        let pdfBytes;
-        if (buf instanceof Uint8Array) {
-          pdfBytes = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
-          // If the Uint8Array is a view into a larger buffer, copy it to its own ArrayBuffer
-          if (pdfBytes.byteOffset !== 0 || pdfBytes.buffer.byteLength !== pdfBytes.byteLength) {
-            pdfBytes = new Uint8Array(pdfBytes);
-          }
-        } else if (buf instanceof ArrayBuffer) {
-          pdfBytes = new Uint8Array(buf);
-        } else {
-          pdfBytes = new Uint8Array(buf);
-        }
-        const writeResult = await window.printAPI.writeTempPdf(pdfBytes, jobId, orient);
-        if (writeResult?.error) throw new Error(writeResult.error);
-
-        const tmpPath = writeResult.path;
-
-        // Build page ranges for the printer (1-based, inclusive)
-        // Only pass ranges if it's not "all pages"
-        let pageRanges;
-        const allPageNums = Array.from({ length: f.pageCount }, (_, i) => i + 1);
-        const isAllPages = pageNumsToPrint.length === f.pageCount &&
-          pageNumsToPrint.every((n, i) => n === allPageNums[i]);
-
-        if (!isAllPages) {
-          // Collapse consecutive page numbers into ranges
-          const sorted = [...pageNumsToPrint].sort((a, b) => a - b);
-          pageRanges = [];
-          let start = sorted[0], end = sorted[0];
-          for (let i = 1; i < sorted.length; i++) {
-            if (sorted[i] === end + 1) { end = sorted[i]; }
-            else { pageRanges.push({ from: start - 1, to: end - 1 }); start = end = sorted[i]; }
-          }
-          pageRanges.push({ from: start - 1, to: end - 1 });
-        }
-
-        // Map paper size string to the value passed to the print backend
-        const pageSizeMap = {
-          A2: "A2", A3: "A3", A4: "A4", A5: "A5",
-          Letter: "Letter", Legal: "Legal",
-          "Indian Legal": "IndianLegal",
-          Tabloid: "Tabloid", Ledger: "Ledger",
-          Executive: "Executive", B4: "B4", B5: "B5",
-        };
-
-        toast("Sending to printer…");
-        const result = await window.printAPI.printPdfFile({
-          filePath: tmpPath,
-          deviceName: destination && destination !== "default" ? destination : undefined,
-          silent: true,
-          color: colorMode === "color",
-          copies: parseInt(copies, 10) || 1,
-          pageSize: pageSizeMap[paper] || "A5",
-          orientation: orient,
-          pageRanges,
-          margins,
-        });
-
-        // Clean up temp file
-        window.printAPI.deleteTempPdf(tmpPath).catch(() => {});
-
-        if (result?.success) {
-          toast(`Printed ${pageNumsToPrint.length} page${pageNumsToPrint.length > 1 ? "s" : ""} ✓`);
-        } else if (result?.error && !result.error.toLowerCase().includes("cancel")) {
-          toast(`Print failed: ${result.error}`);
-        } else {
-          toast("Print cancelled");
-        }
-        return;
-      }
-
-      // ── Web fallback: rasterise pages and open print window ──
-      let buf = f._pdfBuf || pdfCache.get(f.id);
-      if (!buf) {
-        try { buf = await window.db?.getPdf(f.id); } catch (_) {}
-      }
-      if (!buf) { toast("PDF not available for printing"); setIsExecutingPrint(false); return; }
-
-      toast(`Rendering ${pageNumsToPrint.length} page(s)…`);
-      const pdf = await pdfjsLib.getDocument({ data: buf.slice ? buf.slice(0) : buf }).promise;
-      const pagesData = [];
-      let isAnyLandscape = false;
-      const renderScale = 1.0; // 1:1 — no upscaling; browser prints at natural size
-      const jpegQuality = 0.95;
-
-      for (let idx = 0; idx < pageNumsToPrint.length; idx++) {
-        const num = pageNumsToPrint[idx];
-        const pg = await pdf.getPage(num);
-        const baseVp = pg.getViewport({ scale: 1 });
-        const isLandscape = baseVp.width >= baseVp.height;
-        if (isLandscape) isAnyLandscape = true;
-        const viewport = pg.getViewport({ scale: renderScale });
-        const canvas = document.createElement("canvas");
-        canvas.width = viewport.width; canvas.height = viewport.height;
-        const ctx = canvas.getContext("2d");
-        await pg.render({ canvasContext: ctx, viewport }).promise;
-        if (colorMode === "bw") {
-          const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-          const d = imgData.data;
-          for (let i = 0; i < d.length; i += 4) {
-            const g = 0.299 * d[i] + 0.587 * d[i+1] + 0.114 * d[i+2];
-            d[i] = d[i+1] = d[i+2] = g;
-          }
-          ctx.putImageData(imgData, 0, 0);
-        }
-        pagesData.push({ pageNum: num, src: canvas.toDataURL("image/jpeg", jpegQuality), isLandscape });
-        if ((idx + 1) % 5 === 0) await new Promise(r => setTimeout(r, 0));
-      }
-
-      const marginCss = margins === "none" ? "0" : margins === "minimum" ? "3mm" : "5mm";
-      // Determine true landscape page dimensions for @page so the browser
-      // print engine receives an explicit landscape size — not just size:auto.
-      const PAPER_DIMS_MM = {
-        A2: [594, 420], A3: [420, 297], A4: [297, 210], A5: [210, 148],
-        B4: [353, 250], B5: [250, 176],
-        Letter: [279, 216], Legal: [356, 216], "Indian Legal": [345, 215],
-        Tabloid: [432, 279], Ledger: [432, 279], Executive: [267, 184],
-      };
-      const dims = PAPER_DIMS_MM[paper] || PAPER_DIMS_MM["A5"];
-      // Landscape: long edge = width, short edge = height
-      const pgW = Math.max(...dims);
-      const pgH = Math.min(...dims);
-      const htmlContent = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
-        @page{size:${pgW}mm ${pgH}mm;margin:${marginCss}}
-        *{margin:0;padding:0;box-sizing:border-box}
-        html,body{width:${pgW}mm;height:auto;margin:0;padding:0;background:#fff;
-          -webkit-print-color-adjust:exact;print-color-adjust:exact;overflow:visible}
-        .p{display:block;width:${pgW}mm;page-break-after:always;break-after:page;
-          page-break-inside:avoid;break-inside:avoid}
-        .p:last-child{page-break-after:auto;break-after:auto}
-        .p img{display:block;width:100%;height:auto}
-        @media print{
-          @page{size:${pgW}mm ${pgH}mm;margin:${marginCss}}
-          html,body{width:${pgW}mm;height:auto;margin:0;padding:0;overflow:visible}
-          .p img{display:block;width:100%;height:auto}
-        }
-      </style></head><body>
-      ${pagesData.map(p => `<div class="p"><img src="${p.src}"/></div>`).join("")}
-      <script>
-        (function(){
-          var printed=false;
-          function doPrint(){if(printed)return;printed=true;window.print();}
-          if(document.readyState==='complete'){requestAnimationFrame(doPrint);}
-          else{window.addEventListener('load',function(){requestAnimationFrame(doPrint);});}
-          window.addEventListener('afterprint',function(){setTimeout(function(){try{window.close();}catch(_){}},100);});
-        })();
-      <\/script>
-      </body></html>`;
-
-      const w = window.open("", "_blank");
-      if (w) { w.document.write(htmlContent); w.document.close(); }
-      toast(`Print preview opened (${pagesData.length} pages)`);
-
-    } catch (err) {
-      console.error("Print error:", err);
-      toast(`Print error: ${err.message || "Unknown error"}`);
-    } finally {
-      setIsExecutingPrint(false);
-      printingRef.current = false;
-    }
-  }, [printColor, printPaperSize, printOrientation, printMargins, printCopies, printDestination, toast]);
 
   const csvEscape = (v) => {
     const s = v == null ? "" : String(v);
@@ -1279,7 +846,7 @@ export default function InvoiceCopyManager() {
               {selectedPageNums.size > 0 && (
                 <button onClick={() => openPrintModal(activeFile, [...selectedPageNums])}
                   className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-lg bg-teal-600 text-white hover:bg-teal-700 transition-colors">
-                  <Printer size={13} /> Preview Selected ({selectedPageNums.size})
+                  <Printer size={13} /> Print Selected ({selectedPageNums.size})
                 </button>
               )}
               <button
@@ -1288,7 +855,7 @@ export default function InvoiceCopyManager() {
                   openPrintModal(activeFile, nums);
                 }}
                 className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-lg bg-slate-900 text-white hover:bg-slate-700 transition-colors">
-                <Printer size={13} /> Preview All
+                <Printer size={13} /> Print All
               </button>
               <button onClick={() => exportExcel([activeFile])}
                 className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 transition-colors">
@@ -1319,368 +886,7 @@ export default function InvoiceCopyManager() {
           )}
         </header>
 
-        {/* Chrome-Style Print Preview & Settings Modal */}
-        {showPrintPreview && previewFile && (
-          <div className="fixed inset-0 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center z-50 p-2 sm:p-4">
-            <div className="bg-white rounded-2xl shadow-2xl max-w-5xl w-full h-[90vh] max-h-[820px] overflow-hidden flex flex-col md:flex-row border border-slate-200 animate-in fade-in zoom-in-95 duration-150">
-              
-              {/* Left Preview Pane */}
-              <div className="flex-1 bg-[#404040] flex flex-col overflow-hidden relative border-b md:border-b-0 md:border-r border-slate-200">
-                {/* Top bar inside preview */}
-                <div className="px-4 py-2.5 bg-[#323232] flex items-center justify-between z-10 flex-none">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-semibold text-slate-200 truncate max-w-[220px]">
-                      {previewFile.name}
-                    </span>
-                    {previewPageNums.length > 1 && (
-                      <span className="text-[11px] bg-slate-600 text-slate-200 px-2 py-0.5 rounded-full font-mono">
-                        {previewActivePageIdx + 1} / {Math.min(targetPrintPageNums.length, 20)}
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {previewLoading && (
-                      <span className="text-[11px] text-slate-400 flex items-center gap-1">
-                        <Loader2 size={11} className="animate-spin" /> Rendering…
-                      </span>
-                    )}
-                    {previewPageNums.length > 1 && (
-                      <div className="flex items-center gap-1">
-                        <button type="button" disabled={previewActivePageIdx === 0}
-                          onClick={() => setPreviewActivePageIdx(p => Math.max(0, p - 1))}
-                          className="p-1 rounded hover:bg-slate-600 disabled:opacity-30 text-slate-300 transition-colors">
-                          <ChevronLeft size={16} />
-                        </button>
-                        <button type="button" disabled={previewActivePageIdx >= Math.min(targetPrintPageNums.length, 20) - 1}
-                          onClick={() => setPreviewActivePageIdx(p => Math.min(Math.min(targetPrintPageNums.length, 20) - 1, p + 1))}
-                          className="p-1 rounded hover:bg-slate-600 disabled:opacity-30 text-slate-300 transition-colors">
-                          <ChevronRight size={16} />
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </div>
 
-                {/* Paper preview — shows exactly how the page will print */}
-                <div className="flex-1 overflow-auto p-6 flex items-center justify-center">
-                  {previewLoading && previewImages.length === 0 ? (
-                    <div className="flex flex-col items-center gap-3 text-slate-400">
-                      <Loader2 size={28} className="animate-spin" />
-                      <span className="text-xs">Generating print preview…</span>
-                    </div>
-                  ) : previewImages.length > 0 ? (
-                    <div
-                      className="relative shadow-2xl"
-                      style={{
-                        /* Landscape paper aspect ratio based on selected size */
-                        aspectRatio: (() => {
-                          const PAPER_MM = {
-                            A2:[594,420],A3:[420,297],A4:[297,210],A5:[210,148],
-                            B4:[353,250],B5:[250,176],Letter:[279,216],Legal:[356,216],
-                            "Indian Legal":[345,215],Tabloid:[432,279],Ledger:[432,279],Executive:[267,184],
-                          };
-                          const d = PAPER_MM[printPaperSize] || PAPER_MM["A5"];
-                          return `${Math.max(...d)} / ${Math.min(...d)}`;
-                        })(),
-                        maxWidth: "100%",
-                        maxHeight: "100%",
-                        background: "#fff",
-                      }}
-                    >
-                      <img
-                        src={previewImages[previewActivePageIdx] || previewImages[0]}
-                        alt={`Print preview page ${previewActivePageIdx + 1}`}
-                        style={{
-                          width: "100%",
-                          height: "100%",
-                          display: "block",
-                          filter: printColor === "bw" ? "grayscale(100%)" : "none",
-                        }}
-                      />
-                      {/* Margin overlay guides */}
-                      {printMargins !== "none" && (
-                        <div
-                          className="absolute inset-0 pointer-events-none"
-                          style={{
-                            outline: `1px dashed rgba(59,130,246,0.35)`,
-                            outlineOffset: printMargins === "minimum" ? "3%" : "5%",
-                          }}
-                        />
-                      )}
-                    </div>
-                  ) : (
-                    /* Fallback: pdfjs canvas preview (web / no Electron) */
-                    <div
-                      className="bg-white shadow-xl rounded-sm border border-slate-300"
-                      style={{
-                        filter: printColor === "bw" ? "grayscale(100%)" : "none",
-                        aspectRatio: (() => {
-                          const PAPER_MM = {
-                            A2:[594,420],A3:[420,297],A4:[297,210],A5:[210,148],
-                            B4:[353,250],B5:[250,176],Letter:[279,216],Legal:[356,216],
-                            "Indian Legal":[345,215],Tabloid:[432,279],Ledger:[432,279],Executive:[267,184],
-                          };
-                          const d = PAPER_MM[printPaperSize] || PAPER_MM["A5"];
-                          return `${Math.max(...d)} / ${Math.min(...d)}`;
-                        })(),
-                        maxWidth: "100%",
-                        maxHeight: "100%",
-                        overflow: "hidden",
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                      }}
-                    >
-                      <CopyCanvas
-                        key={previewPageNums[previewActivePageIdx]}
-                        pdfBuf={previewFile._pdfBuf || pdfCache.get(previewFile.id)}
-                        pageNum={previewPageNums[previewActivePageIdx] || previewPageNums[0]}
-                        label="" zoom={1} fitMode="page" onFitScale={() => {}}
-                      />
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Right Print Settings Sidebar (matching Chrome Print Options) */}
-              <div className="w-full md:w-[360px] bg-white flex flex-col h-full shadow-lg z-20">
-                
-                {/* Header */}
-                <div className="px-6 py-5 border-b border-slate-100 flex items-baseline justify-between">
-                  <h2 className="text-2xl font-normal text-slate-800 tracking-tight">{bulkPendingFiles ? `Bulk Print` : `Print`}</h2>
-                  <span className="text-xs text-slate-500 font-medium">
-                    {bulkPendingFiles ? `${bulkPendingFiles.length} files` : `${targetPrintPageNums.length} sheet${targetPrintPageNums.length > 1 ? "s" : ""} of paper`}
-                  </span>
-                </div>
-
-                {/* Settings Body */}
-                <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4 text-xs font-normal">
-                  
-                  {/* Destination */}
-                  <div>
-                    <label className="block text-xs font-medium text-slate-600 mb-1.5">Destination</label>
-                    <div className="relative">
-                      <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
-                        <Printer size={15} />
-                      </div>
-                      <select
-                        value={printDestination}
-                        onChange={e => setPrintDestination(e.target.value)}
-                        className="w-full pl-9 pr-8 py-2 bg-white border border-slate-300 rounded-md text-xs font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors shadow-sm appearance-none cursor-pointer"
-                      >
-                        {systemPrinters.map(p => (
-                          <option key={p.name} value={p.name}>
-                            {p.displayName || p.name} {p.isDefault ? "(Default)" : ""}
-                          </option>
-                        ))}
-                      </select>
-                      <div className="absolute inset-y-0 right-0 pr-2.5 flex items-center pointer-events-none text-slate-400">
-                        <ChevronDown size={14} />
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Pages */}
-                  <div>
-                    <label className="block text-xs font-medium text-slate-600 mb-1.5">Pages</label>
-                    <div className="relative">
-                      <select
-                        value={printPageSelection}
-                        onChange={e => setPrintPageSelection(e.target.value)}
-                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-md text-xs font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors shadow-sm appearance-none cursor-pointer"
-                      >
-                        <option value="all">All ({previewPageNums.length} page{previewPageNums.length > 1 ? "s" : ""})</option>
-                        <option value="custom">Custom</option>
-                      </select>
-                      <div className="absolute inset-y-0 right-0 pr-2.5 flex items-center pointer-events-none text-slate-400">
-                        <ChevronDown size={14} />
-                      </div>
-                    </div>
-                    {printPageSelection === "custom" && (
-                      <div className="mt-2">
-                        <input
-                          type="text"
-                          placeholder="e.g. 1-2, 4"
-                          value={printCustomRange}
-                          onChange={e => setPrintCustomRange(e.target.value)}
-                          className="w-full px-3 py-1.5 border border-slate-300 rounded-md text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        />
-                        <p className="text-[10px] text-slate-400 mt-1">Enter page numbers separated by commas or dashes</p>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Color (Black and white / Color) */}
-                  <div>
-                    <label className="block text-xs font-medium text-slate-600 mb-1.5">Color</label>
-                    <div className="relative">
-                      <select
-                        value={printColor}
-                        onChange={e => setPrintColor(e.target.value)}
-                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-md text-xs font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors shadow-sm appearance-none cursor-pointer"
-                      >
-                        <option value="bw">Black and white</option>
-                        <option value="color">Color</option>
-                      </select>
-                      <div className="absolute inset-y-0 right-0 pr-2.5 flex items-center pointer-events-none text-slate-400">
-                        <ChevronDown size={14} />
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Orientation — always visible */}
-                  <div>
-                    <label className="block text-xs font-medium text-slate-600 mb-1.5">Orientation</label>
-                    <div className="relative">
-                      <select
-                        value={printOrientation}
-                        onChange={e => setPrintOrientation(e.target.value)}
-                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-md text-xs font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors shadow-sm appearance-none cursor-pointer"
-                      >
-                        <option value="landscape">Landscape</option>
-                        <option value="portrait">Portrait</option>
-                      </select>
-                      <div className="absolute inset-y-0 right-0 pr-2.5 flex items-center pointer-events-none text-slate-400">
-                        <ChevronDown size={14} />
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Collapsible More Settings */}
-                  <div className="pt-1">
-                    <button
-                      type="button"
-                      onClick={() => setShowMoreSettings(!showMoreSettings)}
-                      className="flex items-center gap-1 text-xs font-medium text-slate-700 hover:text-blue-600 transition-colors py-1 cursor-pointer focus:outline-none"
-                    >
-                      <span>{showMoreSettings ? "Fewer settings" : "More settings"}</span>
-                      <ChevronDown size={14} className={`transform transition-transform duration-200 ${showMoreSettings ? "rotate-180" : ""}`} />
-                    </button>
-
-                    {showMoreSettings && (
-                      <div className="mt-3 space-y-3 pl-1 border-l-2 border-slate-100">
-                        {/* Paper size */}
-                        <div>
-                          <label className="block text-xs font-medium text-slate-600 mb-1">Paper size</label>
-                          <select
-                            value={printPaperSize}
-                            onChange={e => setPrintPaperSize(e.target.value)}
-                            className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none cursor-pointer"
-                          >
-                            <optgroup label="ISO">
-                              <option value="A3">A3 (297 × 420 mm)</option>
-                              <option value="A4">A4 (210 × 297 mm)</option>
-                              <option value="A5">A5 (148 × 210 mm)</option>
-                              <option value="B4">B4 (250 × 353 mm)</option>
-                              <option value="B5">B5 (176 × 250 mm)</option>
-                            </optgroup>
-                            <optgroup label="North America">
-                              <option value="Letter">Letter (8.5 × 11 in)</option>
-                              <option value="Legal">Legal (8.5 × 14 in)</option>
-                              <option value="Tabloid">Tabloid (11 × 17 in)</option>
-                              <option value="Ledger">Ledger (17 × 11 in)</option>
-                              <option value="Executive">Executive (7.25 × 10.5 in)</option>
-                            </optgroup>
-                            <optgroup label="India">
-                              <option value="Indian Legal">Indian Legal (215 × 345 mm)</option>
-                            </optgroup>
-                          </select>
-                        </div>
-
-                        {/* Pages per sheet */}
-                        <div>
-                          <label className="block text-xs font-medium text-slate-600 mb-1">Pages per sheet</label>
-                          <select
-                            value={printPagesPerSheet}
-                            onChange={e => setPrintPagesPerSheet(e.target.value)}
-                            className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none cursor-pointer"
-                          >
-                            <option value="1">1</option>
-                            <option value="2">2</option>
-                          </select>
-                        </div>
-
-                        {/* Margins */}
-                        <div>
-                          <label className="block text-xs font-medium text-slate-600 mb-1">Margins</label>
-                          <select
-                            value={printMargins}
-                            onChange={e => setPrintMargins(e.target.value)}
-                            className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none cursor-pointer"
-                          >
-                            <option value="default">Default</option>
-                            <option value="none">None</option>
-                            <option value="minimum">Minimum</option>
-                          </select>
-                        </div>
-
-                        {/* Scale */}
-                        <div>
-                          <label className="block text-xs font-medium text-slate-600 mb-1">Scale</label>
-                          <select
-                            value={printScale}
-                            onChange={e => setPrintScale(e.target.value)}
-                            className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none cursor-pointer"
-                          >
-                            <option value="default">Default</option>
-                            <option value="fit">Fit to printable area</option>
-                          </select>
-                        </div>
-
-                        {/* Copies */}
-                        <div>
-                          <label className="block text-xs font-medium text-slate-600 mb-1">Copies</label>
-                          <input
-                            type="number"
-                            min="1"
-                            max="99"
-                            value={printCopies}
-                            onChange={e => setPrintCopies(Math.max(1, parseInt(e.target.value, 10) || 1))}
-                            className="w-24 px-2.5 py-1.5 bg-white border border-slate-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                          />
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                </div>
-
-                {/* Footer Actions (matching Google Chrome Print dialog) */}
-                <div className="p-4 border-t border-slate-200 bg-slate-50/70 flex items-center justify-end gap-3">
-                  <button
-                    type="button"
-                    onClick={() => { setShowPrintPreview(false); setBulkPendingFiles(null); }}
-                    className="px-5 py-2 text-xs font-medium text-[#1a73e8] hover:bg-blue-50 border border-slate-300 rounded-full transition-colors active:scale-95 cursor-pointer"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    disabled={isExecutingPrint || !targetPrintPageNums.length}
-                    onClick={async () => {
-                      setShowPrintPreview(false);
-                      if (bulkPendingFiles) {
-                        const files = bulkPendingFiles;
-                        setBulkPendingFiles(null);
-                        await executeBulkPrint(files);
-                      } else {
-                        await executePrint(previewFile, targetPrintPageNums);
-                      }
-                    }}
-                    className="inline-flex items-center gap-2 px-6 py-2 bg-[#1a73e8] hover:bg-[#1557b0] active:scale-95 text-white text-xs font-medium rounded-full shadow-sm disabled:opacity-50 transition-all cursor-pointer"
-                  >
-                    {isExecutingPrint ? <Loader2 size={13} className="animate-spin" /> : null}
-                    Print
-                  </button>
-                </div>
-
-              </div>
-
-            </div>
-          </div>
-        )}
-
-        {/* Page content */}
         <main className="flex-1 overflow-auto p-6">
 
           {/* ── UPLOAD PAGE ── */}

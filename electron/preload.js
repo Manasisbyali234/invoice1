@@ -29,21 +29,11 @@ const printApi = {
   printPdfFile: (options) => ipcRenderer.invoke("print:printPdfFile", options),
   renderPreview: (pdfBuffer, pageNums, paperSize, marginsMm) =>
     ipcRenderer.invoke("print:renderPreview", { pdfBuffer, pageNums, paperSize, marginsMm }),
+  openSystemDialog: (pdfBuffer, pageRanges) =>
+    ipcRenderer.invoke("print:openSystemDialog", { pdfBuffer, pageRanges }),
 };
 
-try {
-  if (contextBridge && contextBridge.exposeInMainWorld) {
-    contextBridge.exposeInMainWorld("loginAPI", loginApi);
-    contextBridge.exposeInMainWorld("detect", detectApi);
-    contextBridge.exposeInMainWorld("db", dbApi);
-    contextBridge.exposeInMainWorld("printAPI", printApi);
-  }
-} catch (_) {}
-
-if (typeof window !== "undefined") {
-  window.loginAPI = loginApi;
-  window.detect = detectApi;
-  window.db = dbApi;
-  window.printAPI = printApi;
-}
-
+contextBridge.exposeInMainWorld("loginAPI", loginApi);
+contextBridge.exposeInMainWorld("detect", detectApi);
+contextBridge.exposeInMainWorld("db", dbApi);
+contextBridge.exposeInMainWorld("printAPI", printApi);

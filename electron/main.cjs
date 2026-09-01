@@ -208,11 +208,35 @@ ipcMain.handle("detect:copyType", (_, { pdfBuffer, pageNum }) => {
 });
 
 // ── Printing IPC Handlers ──────────────────────────────────────────────────
+
+// Virtual/non-physical printers to exclude — these cause OneNote/PDF popups
+const VIRTUAL_PRINTER_RE = [
+  /onenote/i,
+  /microsoft print to pdf/i,
+  /microsoft xps/i,
+  /\bfax\b/i,
+  /pdf creator/i,
+  /pdf writer/i,
+  /cutepdf/i,
+  /dopdf/i,
+  /bullzip/i,
+  /foxit.*pdf/i,
+  /adobe pdf/i,
+  /nitro pdf/i,
+  /print to pdf/i,
+];
+function isVirtualPrinter(name) {
+  return VIRTUAL_PRINTER_RE.some(re => re.test(name || ""));
+}
+
 ipcMain.handle("print:getPrinters", async (event) => {
   try {
     const senderWin = BrowserWindow.fromWebContents(event.sender);
     if (senderWin && senderWin.webContents) {
-      return await senderWin.webContents.getPrintersAsync();
+      const all = await senderWin.webContents.getPrintersAsync();
+      const filtered = all.filter(p => !isVirtualPrinter(p.name));
+      console.log("[printers] available physical printers:", filtered.map(p => p.name));
+      return filtered;
     }
     return [];
   } catch (err) {
@@ -239,6 +263,73 @@ ipcMain.handle("print:writeTempPdf", async (_, { pdfBuffer, jobId }) => {
 
 ipcMain.handle("print:deleteTempPdf", async (_, { filePath }) => {
   try { fs.unlinkSync(filePath); } catch (_) {}
+});
+
+// Opens the native Windows print dialog for a PDF via SumatraPDF -print-dialog,
+// or falls back to shell.openPath so the user can print from their default viewer.
+ipcMain.handle("print:openSystemDialog", async (_, { pdfBuffer, pageRanges }) => {
+  const { shell } = require("electron");
+  try {
+    const jobId = Date.now();
+    const tmpPath = path.join(app.getPath("temp"), `inv_sysdlg_${jobId}.pdf`);
+
+    // If specific pages requested, extract them with pdf-lib first
+    let finalBuffer = toBuffer(pdfBuffer);
+    if (pageRanges && pageRanges.length > 0) {
+      try {
+        const { PDFDocument } = require("pdf-lib");
+        const srcDoc = await PDFDocument.load(finalBuffer);
+        const outDoc = await PDFDocument.create();
+        const indices = [];
+        for (const r of pageRanges) {
+          for (let i = r.from; i <= r.to; i++) indices.push(i);
+        }
+        const copied = await outDoc.copyPages(srcDoc, indices);
+        copied.forEach(p => outDoc.addPage(p));
+        finalBuffer = Buffer.from(await outDoc.save());
+      } catch (e) {
+        console.warn("[print:openSystemDialog] pdf-lib page extract failed:", e.message);
+      }
+    }
+
+    fs.writeFileSync(tmpPath, finalBuffer);
+
+    // Try SumatraPDF with -print-dialog (shows native Windows print dialog)
+    const sumatraCandidates = app.isPackaged
+      ? [
+          path.join(process.resourcesPath, "app.asar.unpacked", "electron", "bin", "SumatraPDF.exe"),
+          "C:\\Program Files\\SumatraPDF\\SumatraPDF.exe",
+          "C:\\Program Files (x86)\\SumatraPDF\\SumatraPDF.exe",
+          path.join(app.getPath("home"), "AppData", "Local", "SumatraPDF", "SumatraPDF.exe"),
+        ]
+      : [
+          path.join(__dirname, "bin", "SumatraPDF.exe"),
+          "C:\\Program Files\\SumatraPDF\\SumatraPDF.exe",
+          "C:\\Program Files (x86)\\SumatraPDF\\SumatraPDF.exe",
+          path.join(app.getPath("home"), "AppData", "Local", "SumatraPDF", "SumatraPDF.exe"),
+        ];
+
+    const sumatraExe = sumatraCandidates.find(p => {
+      try { fs.realpathSync(p); return true; } catch (_) { return false; }
+    });
+
+    if (sumatraExe) {
+      const { spawn } = require("child_process");
+      // -print-dialog opens the native Windows print dialog
+      spawn(sumatraExe, ["-print-dialog", tmpPath], { detached: true, windowsHide: false });
+      // Clean up temp file after a delay (dialog may still be open)
+      setTimeout(() => { try { fs.unlinkSync(tmpPath); } catch (_) {} }, 120000);
+      return { success: true };
+    }
+
+    // Fallback: open with default PDF viewer (user can Ctrl+P from there)
+    await shell.openPath(tmpPath);
+    setTimeout(() => { try { fs.unlinkSync(tmpPath); } catch (_) {} }, 120000);
+    return { success: true };
+  } catch (err) {
+    console.error("[print:openSystemDialog] error:", err.message);
+    return { success: false, error: err.message };
+  }
 });
 
 ipcMain.handle("print:renderPreview", async (_, { pdfBuffer, pageNums, paperSize, marginsMm }) => {
@@ -369,6 +460,15 @@ ipcMain.handle("print:printPdfFile", async (_, options = {}) => {
   }
 
   const printer = (options.deviceName || "").trim();
+
+  // Hard-block virtual/non-physical printers — never send to OneNote etc.
+  if (!printer) {
+    return { success: false, error: "No printer selected. Please select a physical printer." };
+  }
+  if (isVirtualPrinter(printer)) {
+    return { success: false, error: `"${printer}" is a virtual printer. Please select a physical printer.` };
+  }
+
   const copies  = Math.max(1, parseInt(options.copies, 10) || 1);
   const paper   = options.pageSize || "A5";
   const orient  = (options.orientation || "landscape").toLowerCase(); // "landscape" or "portrait"
@@ -527,8 +627,6 @@ try {
     }
 
     return new Promise((resolve) => {
-      // SumatraPDF only accepts: A2 A3 A4 A5 A6 letter legal tabloid
-      // Map everything else to the nearest supported size.
       const SUMATRA_PAPER_MAP = {
         A2: "A2", A3: "A3", A4: "A4", A5: "A5",
         B4: "A3", B5: "A4",
@@ -543,9 +641,14 @@ try {
       const orientSetting = isLandscape ? "landscape" : "portrait";
       const settings = `${copies}x,paper=${paperSetting},${orientSetting},fit`;
 
-      const args = printer
-        ? ["-print-to", printer, "-print-settings", settings, "-silent", "-exit-when-done", printFilePath]
-        : ["-print-to-default", "-print-settings", settings, "-silent", "-exit-when-done", printFilePath];
+      // Always use -print-to with an explicit printer name — never fall back to
+      // -print-to-default which could invoke OneNote or another virtual printer.
+      if (!printer) {
+        if (tempRotatedPath) { try { fs.unlinkSync(tempRotatedPath); } catch (_) {} }
+        resolve({ success: false, error: "No printer selected. Please select a physical printer." });
+        return;
+      }
+      const args = ["-print-to", printer, "-print-settings", settings, "-silent", "-exit-when-done", printFilePath];
 
       console.log("[print] SumatraPDF args:", args.join(" "));
       const proc = spawn(sumatraExe, args, { detached: false, windowsHide: true });
@@ -566,10 +669,10 @@ try {
 
   if (tempRotatedPath) { try { fs.unlinkSync(tempRotatedPath); } catch (_) {} }
 
-  // ── 3. Electron hidden-window rasterise → PowerShell System.Drawing print ──
+  // ── Fallback: Electron hidden-window rasterise → PowerShell System.Drawing print ──
   // Renders each PDF page via pdfjs-dist in a hidden BrowserWindow (real DOM canvas),
   // captures PNGs via capturePage(), then prints via PowerShell System.Drawing.
-  // Zero WinRT. Zero Windows.Storage. Zero external tools.
+  // Zero WinRT. Zero Windows.Storage. Zero external tools. Zero shell.openPath.
   console.log("[print] SumatraPDF not found — using hidden-window rasterise + PowerShell/GDI");
 
   const jobId = options.jobId || Date.now();
@@ -811,7 +914,7 @@ try {
     const proc = spawn(
       "powershell.exe",
       ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", psScriptPath],
-      { detached: false }
+      { detached: false, windowsHide: true }
     );
     proc.stdout && proc.stdout.on("data", d => { stdout += d.toString(); });
     proc.stderr && proc.stderr.on("data", d => { stderr += d.toString(); });
@@ -838,11 +941,19 @@ try {
 const APP_PASSWORD = "invoice@123";
 
 function getElectronAsset(filename) {
-  const p1 = path.join(__dirname, filename);
-  if (fs.existsSync(p1)) return p1;
-  const p2 = path.join(app.getAppPath(), "electron", filename);
-  if (fs.existsSync(p2)) return p2;
-  return p1;
+  const candidates = app.isPackaged
+    ? [
+        path.join(process.resourcesPath, "app.asar.unpacked", "electron", filename),
+        path.join(__dirname, filename),
+      ]
+    : [
+        path.join(__dirname, filename),
+        path.join(app.getAppPath(), "electron", filename),
+      ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  return candidates[0];
 }
 
 async function askPassword() {
@@ -906,13 +1017,14 @@ function createWindow() {
     minHeight: 600,
     title: "Invoice Copy Manager",
     webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
+      nodeIntegration: false,
+      contextIsolation: true,
       webSecurity: false,
       allowRunningInsecureContent: true,
       backgroundThrottling: false,
       preload: getElectronAsset("preload.js"),
     },
+    // preload path logged above via getElectronAsset
   });
   win.setMenuBarVisibility(false);
 

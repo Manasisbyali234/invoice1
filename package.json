@@ -17,7 +17,7 @@
     "productName": "Invoice Manager",
     "executableName": "Invoice Manager",
     "directories": {
-      "output": "C:\\invoice-build"
+      "output": "C:\\invoice-release"
     },
     "files": [
       "dist/**/*",
@@ -32,7 +32,10 @@
       "node_modules/pdfjs-dist/**/*",
       "node_modules/pdf-lib/**/*",
       "node_modules/@pdf-lib/**/*",
-      "electron/bin/**/*"
+      "electron/bin/**/*",
+      "electron/preload.js",
+      "electron/login-preload.js",
+      "electron/login.html"
     ],
     "win": {
       "target": "nsis"
