@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Invoice Manager — Login</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #0f172a;
+      color: #f1f5f9;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      user-select: none;
+      -webkit-app-region: drag;
+    }
+    .card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 24px;
+      width: 320px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 14px;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);
+      -webkit-app-region: no-drag;
+    }
+    h2 {
+      font-size: 15px;
+      font-weight: 600;
+      color: #94a3b8;
+      letter-spacing: 0.5px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    input {
+      width: 100%;
+      padding: 10px 14px;
+      border-radius: 8px;
+      border: 1.5px solid #334155;
+      background: #0f172a;
+      color: #f1f5f9;
+      font-size: 15px;
+      outline: none;
+      text-align: center;
+      letter-spacing: 2px;
+      transition: border-color 0.2s;
+    }
+    input:focus {
+      border-color: #14b8a6;
+      box-shadow: 0 0 0 2px rgba(20, 184, 166, 0.2);
+    }
+    button {
+      width: 100%;
+      padding: 10px 16px;
+      border-radius: 8px;
+      background: #0d9488;
+      color: #ffffff;
+      border: none;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s, transform 0.1s;
+    }
+    button:hover {
+      background: #14b8a6;
+    }
+    button:active {
+      transform: scale(0.98);
+    }
+    .err {
+      color: #f87171;
+      font-size: 12px;
+      min-height: 16px;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>🔒 Enter Password</h2>
+    <input type="password" id="pw" placeholder="••••••••" autofocus />
+    <div class="err" id="err"></div>
+    <button id="submitBtn">Unlock</button>
+  </div>
+
+  <script>
+    const pwInput = document.getElementById("pw");
+    const errDiv = document.getElementById("err");
+    const submitBtn = document.getElementById("submitBtn");
+
+    function getAPI() {
+      if (window.loginAPI && typeof window.loginAPI.submit === "function") {
+        return window.loginAPI;
+      }
+      try {
+        if (typeof require === "function") {
+          const { ipcRenderer } = require("electron");
+          return {
+            submit: (p) => ipcRenderer.send("password-submit", p),
+            onWrong: (cb) => ipcRenderer.on("password-wrong", () => cb()),
+          };
+        }
+      } catch (_) {}
+      return null;
+    }
+
+    function doSubmit() {
+      const val = (pwInput.value || "").trim();
+      if (!val) {
+        errDiv.textContent = "Please enter password";
+        return;
+      }
+      errDiv.textContent = "";
+      const api = getAPI();
+      if (api) {
+        api.submit(val);
+      } else {
+        if (val === "invoice@123") {
+          try {
+            const { ipcRenderer } = require("electron");
+            ipcRenderer.send("password-submit", val);
+          } catch (_) {
+            errDiv.textContent = "Error communicating with app";
+          }
+        } else {
+          errDiv.textContent = "Incorrect password. Try again.";
+          pwInput.value = "";
+          pwInput.focus();
+        }
+      }
+    }
+
+    submitBtn.addEventListener("click", doSubmit);
+    pwInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") doSubmit();
+    });
+
+    const api = getAPI();
+    if (api && typeof api.onWrong === "function") {
+      api.onWrong(() => {
+        errDiv.textContent = "Incorrect password. Try again.";
+        pwInput.value = "";
+        pwInput.focus();
+      });
+    }
+  </script>
+</body>
+</html>

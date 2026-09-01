@@ -1,0 +1,62 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@media print {
+  @page {
+    size: landscape;
+    margin: 0;
+  }
+  html, body {
+    width: auto;
+    height: auto !important;
+    min-height: 0 !important;
+    margin: 0;
+    padding: 0;
+    overflow: visible;
+  }
+  /* Hide all screen UI — only #print-root (if present) or body content prints */
+  body > *:not(#print-root) {
+    display: none !important;
+  }
+  #print-root {
+    display: block !important;
+  }
+  * {
+    box-sizing: border-box;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  /* Prevent fixed/absolute positioned screen elements from adding blank pages */
+  [style*="position: fixed"],
+  [style*="position:fixed"] {
+    display: none !important;
+  }
+  .invoice-container {
+    width: 200mm;
+    max-width: 200mm;
+    margin: 0 auto;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  tr, td, th {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  .invoice-header,
+  .invoice-footer,
+  .invoice-section {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  .page-break {
+    break-before: page;
+    page-break-before: always;
+  }
+  .keep-together {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+}

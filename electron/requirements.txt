@@ -1,0 +1,12 @@
+# Core PDF rendering (pick one)
+pymupdf>=1.23.0        # preferred: pip install pymupdf
+# pdf2image>=1.16.0   # alternative if pymupdf unavailable
+
+# Visual OCR (used when no custom YOLO model is present)
+easyocr>=1.7.0
+
+# Optional: Tesseract fallback
+# pytesseract>=0.3.10
+
+# Optional: Custom YOLO model (place copy_type.pt in electron/models/)
+# ultralytics>=8.0.0

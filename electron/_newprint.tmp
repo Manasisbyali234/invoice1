@@ -1,0 +1,168 @@
+ipcMain.handle("print:writeTempPdf", async (_, { pdfBuffer, jobId }) => {
+  try {
+    const tmpPath = path.join(app.getPath("temp"), `inv_print_${jobId}.pdf`);
+    const buf = toBuffer(pdfBuffer);
+    fs.writeFileSync(tmpPath, buf);
+    const fd = fs.openSync(tmpPath, "r"); fs.closeSync(fd);
+    console.log("[print] temp PDF written:", tmpPath, "size:", buf.length);
+    return { path: tmpPath };
+  } catch (err) {
+    console.error("[print] writeTempPdf error:", err.message);
+    return { error: err.message };
+  }
+});
+
+ipcMain.handle("print:deleteTempPdf", async (_, { filePath }) => {
+  try { fs.unlinkSync(filePath); } catch (_) {}
+});
+
+// Print PDF via Electron webContents.print() — talks directly to Windows GDI spooler.
+// No shell verb, no PDF file association needed. Works for every Windows printer.
+ipcMain.handle("print:printPdfFile", async (_, options = {}) => {
+  const filePath = options.filePath;
+  if (!filePath || !fs.existsSync(filePath)) {
+    console.error("[print] PDF file not found:", filePath);
+    return { success: false, error: "PDF file not found: " + filePath };
+  }
+
+  const printer = (options.deviceName || "").trim();
+  const copies  = Math.max(1, parseInt(options.copies, 10) || 1);
+  const paper   = options.pageSize || "A4";
+  const orient  = options.orientation || "portrait";
+
+  console.log("[print] filePath   :", filePath);
+  console.log("[print] printer    :", printer || "(default)");
+  console.log("[print] copies     :", copies);
+  console.log("[print] paper      :", paper);
+  console.log("[print] orientation:", orient);
+
+  // ── 1. Validate printer exists via Electron's own printer list ──
+  if (printer) {
+    try {
+      const allWins = BrowserWindow.getAllWindows();
+      const anyWin  = allWins[0];
+      if (anyWin) {
+        const printers = await anyWin.webContents.getPrintersAsync();
+        const found = printers.find(p => p.name === printer);
+        if (!found) {
+          console.error("[print] printer not found in system list:", printer);
+          return { success: false, error: `Printer "${printer}" was not found. Please check that it is installed and available.` };
+        }
+        console.log("[print] printer found, status:", found.status);
+      }
+    } catch (e) {
+      console.warn("[print] printer validation failed (non-fatal):", e.message);
+    }
+  }
+
+  // ── 2. Try SumatraPDF if installed (best silent path) ──
+  const sumatraPaths = [
+    "C:\\Program Files\\SumatraPDF\\SumatraPDF.exe",
+    "C:\\Program Files (x86)\\SumatraPDF\\SumatraPDF.exe",
+    path.join(app.getPath("home"), "AppData", "Local", "SumatraPDF", "SumatraPDF.exe"),
+  ];
+  const sumatraExe = sumatraPaths.find(p => fs.existsSync(p));
+  if (sumatraExe) {
+    const { spawn } = require("child_process");
+    console.log("[print] using SumatraPDF:", sumatraExe);
+    return new Promise((resolve) => {
+      const settings = [`${copies}x`, paper, orient].join(",");
+      const args = ["-print-to", printer || "default", "-print-settings", settings, "-silent", filePath];
+      console.log("[print] SumatraPDF args:", args.join(" "));
+      const proc = spawn(sumatraExe, args, { detached: false });
+      let stderr = "";
+      proc.stderr && proc.stderr.on("data", d => { stderr += d.toString(); });
+      proc.on("close", (code) => {
+        console.log("[print] SumatraPDF exit code:", code, stderr || "");
+        if (code === 0) resolve({ success: true });
+        else resolve({ success: false, error: `SumatraPDF exited with code ${code}. ${stderr}`.trim() });
+      });
+      proc.on("error", (err) => {
+        console.error("[print] SumatraPDF spawn error:", err.message);
+        resolve({ success: false, error: err.message });
+      });
+    });
+  }
+
+  // ── 3. Electron webContents.print() — Chromium GDI path, no shell verb needed ──
+  console.log("[print] using Electron webContents.print()");
+  return new Promise((resolve) => {
+    let printWin = new BrowserWindow({
+      show: false,
+      width: 800,
+      height: 600,
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        webSecurity: false,
+        plugins: true,
+      },
+    });
+
+    const cleanup = () => {
+      if (printWin && !printWin.isDestroyed()) {
+        try { printWin.destroy(); } catch (_) {}
+        printWin = null;
+      }
+    };
+
+    const timer = setTimeout(() => {
+      console.error("[print] timed out");
+      cleanup();
+      resolve({ success: false, error: "Print timed out after 60 seconds." });
+    }, 60000);
+
+    printWin.webContents.on("did-fail-load", (e, code, desc) => {
+      console.error("[print] PDF load failed:", code, desc);
+      clearTimeout(timer);
+      cleanup();
+      resolve({ success: false, error: "Print failed. Could not load the PDF file." });
+    });
+
+    printWin.webContents.on("did-finish-load", () => {
+      // Give Chromium's PDF plugin a moment to fully render before printing
+      setTimeout(() => {
+        if (!printWin || printWin.isDestroyed()) return;
+
+        const printOptions = {
+          silent: true,
+          printBackground: true,
+          color: options.color !== false,
+          landscape: orient === "landscape",
+          margins: { marginType: "none" },
+          pageSize: paper,
+        };
+        if (printer) printOptions.deviceName = printer;
+        if (copies > 1) printOptions.copies = copies;
+        if (options.pageRanges && options.pageRanges.length) {
+          printOptions.pageRanges = options.pageRanges;
+        }
+
+        console.log("[print] webContents.print options:", JSON.stringify(printOptions));
+
+        printWin.webContents.print(printOptions, (success, failureReason) => {
+          clearTimeout(timer);
+          cleanup();
+          if (success) {
+            console.log("[print] webContents.print succeeded");
+            resolve({ success: true });
+          } else {
+            const reason = failureReason || "unknown";
+            console.error("[print] webContents.print failed:", reason);
+            if (reason === "cancelled") {
+              resolve({ success: false, error: "cancelled" });
+            } else {
+              resolve({ success: false, error: "Print failed. Windows could not send the PDF to the selected printer. Please verify that the printer is installed and available. (" + reason + ")" });
+            }
+          }
+        });
+      }, 800);
+    });
+
+    // file:// URL — Chromium's built-in PDF viewer handles this natively
+    const fileUrl = "file:///" + filePath.replace(/\\/g, "/");
+    console.log("[print] loading PDF:", fileUrl);
+    printWin.loadURL(fileUrl);
+  });
+});
+
