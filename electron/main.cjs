@@ -506,7 +506,7 @@ ipcMain.handle("print:printPdfFile", async (_, options = {}) => {
       const statusScript = `$p = Get-Printer -Name '${printer.replace(/'/g, "''")}' -ErrorAction SilentlyContinue; if (-not $p) { Write-Output 'NOT_FOUND' } elseif ($p.PrinterStatus -eq 'Offline') { Write-Output 'OFFLINE' } elseif ($p.PrinterStatus -eq 'Paused') { Write-Output 'PAUSED' } else { Write-Output 'OK' }`;
       const statusResult = await new Promise((resolve) => {
         let out = "";
-        const proc = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", statusScript], { detached: false });
+        const proc = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", statusScript], { detached: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"], shell: false });
         proc.stdout && proc.stdout.on("data", d => { out += d.toString(); });
         proc.on("close", () => resolve(out.trim()));
         proc.on("error", () => resolve("OK"));
@@ -619,7 +619,7 @@ try {
 `;
       await new Promise((resolve) => {
         let out = "";
-        const proc = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", forceScript], { detached: false, windowsHide: true });
+        const proc = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", forceScript], { detached: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"], shell: false });
         proc.stdout && proc.stdout.on("data", d => { out += d.toString(); });
         proc.on("close", () => { console.log("[print] DEVMODE landscape set:", out.trim()); resolve(); });
         proc.on("error", () => resolve());
@@ -914,7 +914,7 @@ try {
     const proc = spawn(
       "powershell.exe",
       ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", psScriptPath],
-      { detached: false, windowsHide: true }
+      { detached: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"], shell: false }
     );
     proc.stdout && proc.stdout.on("data", d => { stdout += d.toString(); });
     proc.stderr && proc.stderr.on("data", d => { stderr += d.toString(); });

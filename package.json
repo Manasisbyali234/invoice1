@@ -17,7 +17,7 @@
     "productName": "Invoice Manager",
     "executableName": "Invoice Manager",
     "directories": {
-      "output": "C:\\invoice-release"
+      "output": "C:\\Users\\Mansi\\Downloads\\invoice\\release"
     },
     "files": [
       "dist/**/*",
